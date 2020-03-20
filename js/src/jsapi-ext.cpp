@@ -1,14 +1,17 @@
 #include "jsapi-ext.h"
 
+#include <algorithm>
+#include <iostream>
+
 #include "vm/NativeObject.h"
-#include "wasm/WasmCompile.h"
-#include "wasm/WasmTypes.h"
 #include "wasm/WasmCode.h"
+#include "wasm/WasmCompile.h"
+#include "wasm/WasmInstance.h"
 #include "wasm/WasmJS.h"
 #include "wasm/WasmTypes.h"
-#include "wasm/WasmInstance.h"
-#include <iostream>
-#include <algorithm>
+
+
+
 
 class js::ext::CompiledInstructions::Internal {
   friend std::unique_ptr<js::ext::CompiledInstructions>

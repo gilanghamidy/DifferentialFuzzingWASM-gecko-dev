@@ -5,12 +5,12 @@
  * EXTENSION FOR INSTRUMENTATION PURPOSE
  */
 
-#include <memory>
-#include <vector>
-#include <string>
-#include <map>
-#include <list>
 #include <functional>
+#include <list>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "jsapi.h"
 
