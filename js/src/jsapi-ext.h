@@ -47,7 +47,10 @@ public:
     CompiledInstructions(JSContext*);
     ~CompiledInstructions();
     std::list<Function> const& functions() { return functions_; }
-    Function& operator[](std::string const& arg) { return functionsByName.find(arg)->second.get(); }
+    Function* operator[](std::string const& arg) { 
+        auto funcIter = functionsByName.find(arg);
+        return funcIter != functionsByName.end() ? &funcIter->second.get() : nullptr; 
+    }
 };
 
 
