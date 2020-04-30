@@ -8,8 +8,8 @@
 #include "wasm/WasmCompile.h"
 #include "wasm/WasmInstance.h"
 #include "wasm/WasmJS.h"
+#include "wasm/WasmModule.h"
 #include "wasm/WasmTypes.h"
-
 
 
 
@@ -19,23 +19,103 @@ class js::ext::CompiledInstructions::Internal {
   friend class js::ext::CompiledInstructions;
 
   js::RootedWasmInstanceObject instance;
-
+  js::wasm::SharedModule module;
+  js::WasmMemoryObject* wasm_memory { nullptr };
+  
+public:
   Internal(JSContext* cx) : instance(cx) { }
 };
 
-bool js::ext::CompiledInstructions::Function::Invoke(JSContext* cs, std::vector<JS::Value>& argsStack) {
+bool js::ext::CompiledInstructions::Function::Invoke(JSContext* cs, std::vector<JS::Value>& argsStack) {  
+  if(parent->internal->instance.get() == nullptr)
+    return false;
+
   auto& moduleInstance = parent->internal->instance;
   js::wasm::Instance& instance = moduleInstance->instance();
-  std::cout << "Invoke: " << this->index << "argStack.size: " << argsStack.size() << std::endl;
   return instance.callExport(cs, this->index, JS::CallArgsFromVp(argsStack.size(), argsStack.data()));
 }
 
 js::ext::CompiledInstructions::CompiledInstructions(JSContext* cx) {
-  this->internal = new Internal(cx);
+  this->internal = std::make_unique<Internal>(cx);
 }
 
 JS_PUBLIC_API js::ext::CompiledInstructions::~CompiledInstructions() {
-  delete this->internal;
+}
+
+js::ext::WasmType ValTypeToExtType(js::wasm::ValType::Kind valTypeKind) {
+  using Kind = js::wasm::ValType::Kind;
+  using WasmType = js::ext::WasmType;
+  switch(valTypeKind) {
+    case Kind::I32: return WasmType::I32;
+    case Kind::I64: return WasmType::I64;
+    case Kind::F32: return WasmType::F32;
+    case Kind::F64: return WasmType::F64;
+  }
+  MOZ_ASSERT_UNREACHABLE("Invalid ValType::Kind");
+}
+
+bool js::ext::CompiledInstructions::InstantiateWasm(JSContext* cx) {
+  // Instantiate the module
+  Rooted<js::wasm::ImportValues> imports(cx);
+  
+  // Add memory
+  if(this->internal->wasm_memory != nullptr)
+    imports.get().memory = this->internal->wasm_memory;
+
+  if(!this->internal->module->instantiate(
+            cx, imports.get(), nullptr, &this->internal->instance))
+    return false;
+
+  return true;
+}
+
+void JS_PUBLIC_API js::ext::CompiledInstructions::NewMemoryImport(JSContext* cx) {
+  mozilla::Maybe<uint32_t> maxSize;
+  mozilla::Maybe<size_t> mappedSize;
+  const wasm::Metadata& metadata = this->internal->module->metadata();
+  const wasm::MetadataCacheablePod& pod = metadata.pod();
+  
+  /*
+  auto wasm_buffer = 
+        js::WasmArrayRawBuffer::Allocate(pod.minMemoryLength, 
+                                         pod.maxMemoryLength, 
+                                         mappedSize);
+        
+  js::Rooted<js::ArrayBufferObject*> array_buffer { cx };
+  array_buffer.set(js::ArrayBufferObject::createFromNewRawBuffer(
+                                        cx, wasm_buffer, 
+                                        pod.minMemoryLength));
+
+  JS::RootedObject proto(
+        cx, &cx->global()->getPrototype(JSProto_WasmMemory).toObject());
+
+  this->internal->wasm_memory = js::WasmMemoryObject::create(
+                                        cx, {array_buffer}, proto);
+
+  MOZ_ASSERT(!metadata().isAsmJS());
+  */
+
+  uint32_t declaredMin = metadata.minMemoryLength;
+  mozilla::Maybe<uint32_t> declaredMax = metadata.maxMemoryLength;
+
+  RootedArrayBufferObjectMaybeShared buffer(cx);
+  wasm::Limits l(declaredMin, declaredMax, wasm::Shareable::False);
+  if (!CreateWasmBuffer(cx, l, &buffer)) {
+    std::cout << "Error CreateWasmBuffer\n";
+    return;
+  }
+
+  RootedObject proto(
+      cx, &cx->global()->getPrototype(JSProto_WasmMemory).toObject());
+  this->internal->wasm_memory = WasmMemoryObject::create(cx, buffer, proto);
+}
+
+auto JS_PUBLIC_API js::ext::CompiledInstructions::GetWasmMemory() -> WasmMemoryRef {
+  if(this->internal->wasm_memory == nullptr ) {
+    return { nullptr };
+  }
+  auto data = this->internal->wasm_memory->buffer().dataPointerEither();
+  return { data.unwrap(), this->internal->wasm_memory->volatileMemoryLength() };
 }
 
 JS_PUBLIC_API std::unique_ptr<js::ext::CompiledInstructions>
@@ -80,20 +160,15 @@ JS_PUBLIC_API std::unique_ptr<js::ext::CompiledInstructions>
 
   auto retObj = std::make_unique<js::ext::CompiledInstructions>(cx);
 
+  retObj->internal->module = module;
+
   auto& wasmCode = module->code();
   auto& codeTierMeta = wasmCode.codeTier(js::wasm::Tier::Optimized).metadata();
   auto& codesegment = module->code().codeTier(js::wasm::Tier::Optimized).segment();
   auto& moduleExports = module->exports();
   auto baseaddress = codesegment.base();
   auto len = codesegment.length();
-
-  Rooted<ImportValues> imports(cx);
-
-  
-
-  // Instantiate the module
-  if(!module->instantiate(cx, imports.get(), nullptr, &retObj->internal->instance))
-    return { };
+  auto& funcExports = codeTierMeta.funcExports;
 
   for(auto& codeRange : codeTierMeta.codeRanges) {
     if(codeRange.isFunction()) {
@@ -108,10 +183,29 @@ JS_PUBLIC_API std::unique_ptr<js::ext::CompiledInstructions>
                                      moduleExports.end(),
                                      [idx = codeRange.funcIndex()] (Export const& a) { return a.funcIndex() == idx; });
 
+      auto funcExportMeta = std::find_if(funcExports.begin(),
+                                         funcExports.end(),
+                                         [idx = codeRange.funcIndex()] (FuncExport const& a) { return a.funcIndex() == idx; });
+      
       if(funcExport != moduleExports.end()) {
         dumpedFunction.exported = true;
         dumpedFunction.name = funcExport->fieldName();
         retObj->functionsByName.emplace(dumpedFunction.name, std::ref(dumpedFunction));
+      }
+
+      if(funcExportMeta != funcExports.end()) {
+        FuncType const& funcType = funcExportMeta->funcType();
+        auto returnTypeMaybe = funcType.ret();
+
+        // Get Return Type information
+        // TODO: Change return type to vector instead of singleton
+        dumpedFunction.returnType = returnTypeMaybe.isNothing()
+                                    ? WasmType::Void
+                                    : ValTypeToExtType(returnTypeMaybe->kind());
+        // Get parameters
+        for(decltype(auto) kind : funcType.args()) {
+          dumpedFunction.parameters.push_back(ValTypeToExtType(kind.kind()));
+        }
       }
     }
   }
