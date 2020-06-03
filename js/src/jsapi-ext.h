@@ -54,6 +54,7 @@ private:
     class Internal;
     std::unique_ptr<Internal> internal;
     std::list<Function> functions_;
+    std::map<std::string, WasmType> globals_;
     std::map<std::string, std::reference_wrapper<Function>> functionsByName;
 
 public:
@@ -62,13 +63,25 @@ public:
         size_t length;
     };
 
+    union WasmGlobalArg {
+        uint32_t i32;
+        uint64_t i64;
+        float   f32;
+        double  f64;
+    };
+
     CompiledInstructions(JSContext*);
     JS_PUBLIC_API ~CompiledInstructions();
     std::list<Function> const& functions() { return functions_; }
+    std::map<std::string, WasmType> const& Globals() const noexcept { return globals_; }
 
     bool JS_PUBLIC_API InstantiateWasm(JSContext* cx);
 
     void JS_PUBLIC_API NewMemoryImport(JSContext* cx);
+    void JS_PUBLIC_API NewGlobalImport(JSContext* cx);
+
+    void JS_PUBLIC_API SetGlobalImport(JSContext* cx, std::string const& name, WasmGlobalArg value);
+    std::pair<WasmType, WasmGlobalArg> JS_PUBLIC_API GetGlobalImport(JSContext* cx, std::string const& name);
 
     WasmMemoryRef JS_PUBLIC_API GetWasmMemory();
 

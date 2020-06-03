@@ -11,7 +11,12 @@
 #include "wasm/WasmModule.h"
 #include "wasm/WasmTypes.h"
 
+#include "vm/ArrayBufferObject-inl.h"
 
+struct GlobalEntry {
+  js::ext::WasmType type;
+  js::WasmGlobalObject* global_object;
+};
 
 class js::ext::CompiledInstructions::Internal {
   friend std::unique_ptr<js::ext::CompiledInstructions>
@@ -21,7 +26,9 @@ class js::ext::CompiledInstructions::Internal {
   js::RootedWasmInstanceObject instance;
   js::wasm::SharedModule module;
   js::WasmMemoryObject* wasm_memory { nullptr };
-  
+  std::map<std::string, GlobalEntry> wasm_global_list;
+  js::WasmGlobalObjectVector global_vector;
+  bool global_import_processed { false };
 public:
   Internal(JSContext* cx) : instance(cx) { }
 };
@@ -61,6 +68,13 @@ bool js::ext::CompiledInstructions::InstantiateWasm(JSContext* cx) {
   // Add memory
   if(this->internal->wasm_memory != nullptr)
     imports.get().memory = this->internal->wasm_memory;
+  
+  if(this->internal->global_vector.length() != 0) {
+    imports.get().globalObjs.resize(this->internal->global_vector.length());
+    for(int i = 0; i < this->internal->global_vector.length(); ++i) {
+      imports.get().globalObjs[i] = this->internal->global_vector[i];
+    }
+  }
 
   if(!this->internal->module->instantiate(
             cx, imports.get(), nullptr, &this->internal->instance))
@@ -109,6 +123,95 @@ void JS_PUBLIC_API js::ext::CompiledInstructions::NewMemoryImport(JSContext* cx)
       cx, &cx->global()->getPrototype(JSProto_WasmMemory).toObject());
   this->internal->wasm_memory = WasmMemoryObject::create(cx, buffer, proto);
 }
+
+void JS_PUBLIC_API js::ext::CompiledInstructions::NewGlobalImport(JSContext* cx) {
+  if(this->internal->global_import_processed)
+    return;
+  this->internal->global_import_processed = true;
+
+  auto& moduleImports = this->internal->module->imports();
+  const wasm::Metadata& metadata = this->internal->module->metadata();
+  uint32_t globalIndex = 0;
+  const wasm::GlobalDescVector& globals = metadata.globals;
+
+  for(js::wasm::Import const& importEntry : moduleImports) {
+    if(importEntry.kind == js::wasm::DefinitionKind::Global) {
+      uint32_t this_index = globalIndex++;
+      wasm::GlobalDesc const& this_desc = globals[this_index];
+      MOZ_ASSERT(this_desc.isImport());
+
+      wasm::ValType this_type = this_desc.type();
+
+      // Create initial value based on type(source: WasmJS.cpp:550-557)
+      wasm::RootedVal val(cx);
+      val.set(wasm::Val(this_type));
+
+      // Create WasmGlobalObject with the specified global type
+      RootedObject proto(cx);
+      proto = GlobalObject::getOrCreatePrototype(cx, JSProto_WasmGlobal);
+      WasmGlobalObject* this_global = WasmGlobalObject::create(cx, val, this_desc.isMutable(), proto);
+
+      // Store in WasmGlobalObjectVector based on its index
+      if (this->internal->global_vector.length() <= this_index &&
+          !this->internal->global_vector.resize(this_index + 1)) {
+        ReportOutOfMemory(cx);
+        return;
+      }
+      this->internal->global_vector[this_index] = this_global;
+      this->internal->wasm_global_list.emplace(
+          std::string{importEntry.field.get()}, 
+          GlobalEntry {ValTypeToExtType(this_type.kind()), this_global });
+
+      this->globals_.emplace(std::string{importEntry.field.get()}, ValTypeToExtType(this_type.kind()));
+
+    }
+  }
+}
+
+void js::ext::CompiledInstructions::SetGlobalImport(JSContext* cx, std::string const& name, WasmGlobalArg value) {
+  auto& global_list = this->internal->wasm_global_list;
+  auto global_iter = global_list.find(name);
+  if(global_iter != global_list.end()) {
+    using E = js::ext::WasmType;
+    GlobalEntry& global_ = global_iter->second;
+    wasm::RootedVal val(cx);
+    
+    switch(global_.type) {
+      case E::I32: val.set(wasm::Val(value.i32)); break;
+      case E::I64: val.set(wasm::Val(value.i64)); break;
+      case E::F32: val.set(wasm::Val(value.f32)); break;
+      case E::F64: val.set(wasm::Val(value.f64)); break;
+      case E::Void: MOZ_CRASH();
+    }
+    global_.global_object->setVal(cx, val);
+  }
+}
+
+auto js::ext::CompiledInstructions::GetGlobalImport(JSContext* cx, std::string const& name) 
+  -> std::pair<WasmType, WasmGlobalArg> {
+  using E = js::ext::WasmType;
+  auto& global_list = this->internal->wasm_global_list;
+  auto global_iter = global_list.find(name);
+  if(global_iter != global_list.end()) {
+    
+    GlobalEntry& global_ = global_iter->second;
+    wasm::RootedVal val(cx);
+    global_.global_object->val(&val);
+
+    WasmGlobalArg value;
+    switch(global_.type) {
+      case E::I32: value.i32 = val.get().i32(); break;
+      case E::I64: value.i64 = val.get().i64(); break;
+      case E::F32: value.f32 = val.get().f32(); break;
+      case E::F64: value.f64 = val.get().f64(); break;
+      case E::Void: MOZ_CRASH();
+    }
+    return {global_.type, value};
+  } else {
+    return {E::Void, {}};
+  }
+}
+
 
 auto JS_PUBLIC_API js::ext::CompiledInstructions::GetWasmMemory() -> WasmMemoryRef {
   if(this->internal->wasm_memory == nullptr ) {
@@ -195,13 +298,17 @@ JS_PUBLIC_API std::unique_ptr<js::ext::CompiledInstructions>
 
       if(funcExportMeta != funcExports.end()) {
         FuncType const& funcType = funcExportMeta->funcType();
-        auto returnTypeMaybe = funcType.ret();
 
         // Get Return Type information
         // TODO: Change return type to vector instead of singleton
-        dumpedFunction.returnType = returnTypeMaybe.isNothing()
-                                    ? WasmType::Void
-                                    : ValTypeToExtType(returnTypeMaybe->kind());
+        decltype(auto) resultTypes = funcType.results();
+        if(resultTypes.empty()) {
+          dumpedFunction.returnType = WasmType::Void;
+        } else {
+          // Only take the first one
+          dumpedFunction.returnType = ValTypeToExtType(resultTypes[0].kind()); 
+        }
+
         // Get parameters
         for(decltype(auto) kind : funcType.args()) {
           dumpedFunction.parameters.push_back(ValTypeToExtType(kind.kind()));
