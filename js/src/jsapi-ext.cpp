@@ -1,7 +1,9 @@
 #include "jsapi-ext.h"
 
 #include <algorithm>
+#include <chrono>
 #include <iostream>
+
 
 #include "vm/NativeObject.h"
 #include "wasm/WasmCode.h"
@@ -33,13 +35,21 @@ public:
   Internal(JSContext* cx) : instance(cx) { }
 };
 
-bool js::ext::CompiledInstructions::Function::Invoke(JSContext* cs, std::vector<JS::Value>& argsStack) {  
+std::tuple<bool, uint64_t>  js::ext::CompiledInstructions::Function::Invoke(JSContext* cs, std::vector<JS::Value>& argsStack) {  
   if(parent->internal->instance.get() == nullptr)
-    return false;
+    return {false, 0};
 
   auto& moduleInstance = parent->internal->instance;
   js::wasm::Instance& instance = moduleInstance->instance();
-  return instance.callExport(cs, this->index, JS::CallArgsFromVp(argsStack.size(), argsStack.data()));
+  auto callargs = JS::CallArgsFromVp(argsStack.size(), argsStack.data());
+
+  std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
+  bool res = instance.callExport(cs, this->index, callargs);
+  std::chrono::steady_clock::time_point end_time = std::chrono::steady_clock::now();
+  
+  uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count();
+  
+  return {res, elapsed};
 }
 
 js::ext::CompiledInstructions::CompiledInstructions(JSContext* cx) {

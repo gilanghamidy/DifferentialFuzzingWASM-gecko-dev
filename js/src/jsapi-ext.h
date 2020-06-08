@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "jsapi.h"
@@ -46,7 +47,7 @@ public:
         std::vector<WasmType> parameters;
         WasmType returnType;
 
-        bool JS_PUBLIC_API Invoke(JSContext* cs, std::vector<JS::Value>& argsStack);
+        std::tuple<bool, uint64_t> JS_PUBLIC_API Invoke(JSContext* cs, std::vector<JS::Value>& argsStack);
     };
 
 private:
