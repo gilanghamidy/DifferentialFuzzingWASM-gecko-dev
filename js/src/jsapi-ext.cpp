@@ -290,11 +290,12 @@ JS_PUBLIC_API std::unique_ptr<js::ext::CompiledInstructions>
       auto codeEnd = baseaddress + codeRange.end();
       dumpedFunction.parent = retObj.get();
       dumpedFunction.instructions.insert(dumpedFunction.instructions.end(), codeBegin, codeEnd);
+      dumpedFunction.instruction_address = (uintptr_t)codeBegin;
       dumpedFunction.index = codeRange.funcIndex();
 
       auto funcExport = std::find_if(moduleExports.begin(),
                                      moduleExports.end(),
-                                     [idx = codeRange.funcIndex()] (Export const& a) { return a.funcIndex() == idx; });
+                                     [idx = codeRange.funcIndex()] (Export const& a) { return a.kind() == DefinitionKind::Function && a.funcIndex() == idx; });
 
       auto funcExportMeta = std::find_if(funcExports.begin(),
                                          funcExports.end(),

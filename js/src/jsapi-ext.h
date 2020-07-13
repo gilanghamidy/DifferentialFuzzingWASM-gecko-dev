@@ -42,6 +42,7 @@ public:
         bool exported;
         uint32_t index;
         CompiledInstructions* parent;
+        uintptr_t instruction_address;
         
         // Reflection info
         std::vector<WasmType> parameters;
